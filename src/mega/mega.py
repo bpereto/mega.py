@@ -343,7 +343,8 @@ class Mega:
             return files[handle]
         path = Path(filename)
         filename = path.name
-        parent_dir_name = path.parent.name
+        parent_path = path.parent
+        parent_dir_name = str(parent_path) if parent_path.name else ""
         for file in list(files.items()):
             try:
                 if parent_dir_name:
@@ -652,7 +653,7 @@ class Mega:
         nodes = self.get_files()
         return self.get_folder_link(nodes[node_id])
 
-    def download_url(self, url, dest_path=None, dest_filename=None, no_temp_file=False):
+    def download_url(self, url, dest=None, dest_filename=None, no_temp_file=False, *args, **kwargs):
         """
         Download a file by it's public url
         """
@@ -662,20 +663,23 @@ class Mega:
         return self._download_file(
             file_handle=file_id,
             file_key=file_key,
-            dest_path=dest_path,
+            dest=dest,
             dest_filename=dest_filename,
             is_public=True,
-            no_temp_file=no_temp_file
+            no_temp_file=no_temp_file,
+            *args,
+            **kwargs
         )
 
     def _download_file(self,
                        file_handle,
                        file_key,
-                       dest_path=None,
+                       dest=None,
                        dest_filename=None,
                        is_public=False,
                        file=None,
-                       no_temp_file=False):
+                       *args,
+                       **kwargs):
         if file is None:
             if is_public:
                 file_key = base64_to_a32(file_key)
@@ -716,65 +720,59 @@ class Mega:
         else:
             file_name = attribs['n']
 
-        input_file = requests.get(file_url, stream=True).raw
+        response = requests.get(file_url, stream=True)
+        response.raise_for_status()
+        input_file = response.raw
 
-        if dest_path is None:
-            dest_path = ''
+        if dest is None or isinstance(dest, (str, Path)):
+            dest += '/'
+            output_path = Path(dest + file_name)
+            output = open(output_path, 'xb')
         else:
-            dest_path += '/'
-        output_path = Path(dest_path + file_name)
+            output = dest
 
-        with (tempfile.NamedTemporaryFile(mode='w+b',
-                                         prefix='megapy_',
-                                         delete=False) if not no_temp_file else open(output_path, 'xb')) as temp_output_file:
-            with tqdm.tqdm(total=file_size, unit='iB', unit_scale=True) as progress_bar:
-                k_str = a32_to_str(k)
-                counter = Counter.new(128,
-                                      initial_value=((iv[0] << 32) + iv[1]) << 64)
-                aes = AES.new(k_str, AES.MODE_CTR, counter=counter)
+        k_str = a32_to_str(k)
+        counter = Counter.new(128,
+                              initial_value=((iv[0] << 32) + iv[1]) << 64)
+        aes = AES.new(k_str, AES.MODE_CTR, counter=counter)
 
-                # mega.nz improperly uses CBC as a MAC mode, so after each chunk, the computed mac_bytes are used as IV for the next chunk MAC accumulation
-                mac_bytes = b'\0' * 16
-                mac_encryptor = AES.new(k_str, AES.MODE_CBC, mac_bytes)
-                iv_str = a32_to_str([iv[0], iv[1], iv[0], iv[1]])
+        # mega.nz improperly uses CBC as a MAC mode, so after each chunk, the computed mac_bytes are used as IV for the next chunk MAC accumulation
+        mac_bytes = b'\0' * 16
+        mac_encryptor = AES.new(k_str, AES.MODE_CBC, mac_bytes)
+        iv_str = a32_to_str([iv[0], iv[1], iv[0], iv[1]])
 
-                for chunk_start, chunk_size in get_chunks(file_size):
-                    # print('Chunk size from generator: '+chunk_size)
-                    chunk = input_file.read(chunk_size)
-                    chunk = aes.decrypt(chunk)
-                    temp_output_file.write(chunk)
-                    progress_bar.update(len(chunk))
+        for chunk_start, chunk_size in get_chunks(file_size):
+            # print('Chunk size from generator: '+chunk_size)
+            chunk = input_file.read(chunk_size)
+            chunk = aes.decrypt(chunk)
+            output.write(chunk)
 
-                    encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
+            encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
 
-                    # take last 16-N bytes from chunk (with N between 1 and 16, including extremes)
-                    mv = memoryview(chunk) # avoid copying memory for the entire chunk when slicing
-                    modchunk = len(chunk) % 16
-                    if modchunk == 0:
-                        # ensure we reserve the last 16 bytes anyway, we have to feed them into mac_encryptor
-                        modchunk = 16
-                        last_block = chunk[-modchunk:] # fine to copy bytes here, they're only a few bytes
-                    else:
-                        last_block = chunk[-modchunk:] + (b'\0' * (16 - modchunk)) # pad last block to 16 bytes
-                    rest_of_chunk = mv[:-modchunk]
+            # take last 16-N bytes from chunk (with N between 1 and 16, including extremes)
+            mv = memoryview(chunk) # avoid copying memory for the entire chunk when slicing
+            modchunk = len(chunk) % 16
+            if modchunk == 0:
+                # ensure we reserve the last 16 bytes anyway, we have to feed them into mac_encryptor
+                modchunk = 16
+                last_block = chunk[-modchunk:] # fine to copy bytes here, they're only a few bytes
+            else:
+                last_block = chunk[-modchunk:] + (b'\0' * (16 - modchunk)) # pad last block to 16 bytes
+            rest_of_chunk = mv[:-modchunk]
 
-                    encryptor.encrypt(rest_of_chunk)
-                    input_to_mac = encryptor.encrypt(last_block)
-                    mac_bytes = mac_encryptor.encrypt(input_to_mac)
+            encryptor.encrypt(rest_of_chunk)
+            input_to_mac = encryptor.encrypt(last_block)
+            mac_bytes = mac_encryptor.encrypt(input_to_mac)
 
-                    # file_info = os.stat(temp_output_file.name)
-                    # logger.info('%s of %s downloaded', file_info.st_size,
-                    #             file_size)
-                file_mac = str_to_a32(mac_bytes)
-                # check mac integrity
-                if (file_mac[0] ^ file_mac[1],
-                        file_mac[2] ^ file_mac[3]) != meta_mac:
-                    raise ValueError('Mismatched mac')
-                output_name = temp_output_file.name
-        if not no_temp_file:
-            print('Moving temporary file to destination path')
-            shutil.move(output_name, output_path)
-        return output_path
+            # file_info = os.stat(temp_output_file.name)
+            # logger.info('%s of %s downloaded', file_info.st_size,
+            #             file_size)
+        file_mac = str_to_a32(mac_bytes)
+        # check mac integrity
+        if (file_mac[0] ^ file_mac[1],
+                file_mac[2] ^ file_mac[3]) != meta_mac:
+            raise ValueError('Mismatched mac')
+        return file_name
 
     def upload(self, filename, dest=None, dest_filename=None):
         # determine storage node
