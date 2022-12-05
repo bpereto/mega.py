@@ -1,3 +1,4 @@
+import inspect
 import math
 import re
 import json
@@ -653,14 +654,14 @@ class Mega:
         nodes = self.get_files()
         return self.get_folder_link(nodes[node_id])
 
-    def download_url(self, url, dest=None, dest_filename=None, no_temp_file=False, *args, **kwargs):
+    async def download_url(self, url, dest=None, dest_filename=None, no_temp_file=False, *args, **kwargs):
         """
         Download a file by it's public url
         """
         path = self._parse_url(url).split('!')
         file_id = path[0]
         file_key = path[1]
-        return self._download_file(
+        return await self._download_file(
             file_handle=file_id,
             file_key=file_key,
             dest=dest,
@@ -671,7 +672,7 @@ class Mega:
             **kwargs
         )
 
-    def _download_file(self,
+    async def _download_file(self,
                        file_handle,
                        file_key,
                        dest=None,
@@ -745,7 +746,10 @@ class Mega:
             # print('Chunk size from generator: '+chunk_size)
             chunk = input_file.read(chunk_size)
             chunk = aes.decrypt(chunk)
-            output.write(chunk)
+            if inspect.isawaitable(output.write):
+                await output.write(chunk)
+            else:
+                output.write(chunk)
 
             encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
 
