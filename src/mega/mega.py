@@ -746,10 +746,9 @@ class Mega:
             # print('Chunk size from generator: '+chunk_size)
             chunk = input_file.read(chunk_size)
             chunk = aes.decrypt(chunk)
-            if inspect.isawaitable(output.write):
-                await output.write(chunk)
-            else:
-                output.write(chunk)
+            func_w = output.write(chunk)
+            if inspect.isawaitable(func_w):
+                await func_w
 
             encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
 
