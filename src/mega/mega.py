@@ -775,7 +775,7 @@ class Mega:
         if (file_mac[0] ^ file_mac[1],
                 file_mac[2] ^ file_mac[3]) != meta_mac:
             raise ValueError('Mismatched mac')
-        return file_name
+        return file_name, file_size
 
     def upload(self, filename, dest=None, dest_filename=None):
         # determine storage node
